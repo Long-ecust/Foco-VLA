@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="FoCo-VLA project page for force-as-context vision-language-action policies in contact-rich manipulation."
+    />
+    <title>FoCo-VLA: Force-as-Context VLA Policies</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <section class="title-block">
+        <h1>
+          <span>FoCo-VLA</span>: Force-as-Context Vision-Language-Action
+          Policies for Contact-Rich Manipulation
+        </h1>
+        <p class="venue">Target venue: IEEE Robotics and Automation Letters (RA-L)</p>
+        <p class="authors">Author list and affiliations to be added before submission.</p>
+        <p class="affiliations">
+          Robotics PhD research project · embodied manipulation · force-aware VLA
+        </p>
+        <div class="link-row" aria-label="Project links">
+          <a class="pill primary" href="#paper">Paper</a>
+          <a class="pill" href="#videos">Videos</a>
+          <a class="pill" href="#method">Method</a>
+          <a class="pill" href="#release">Code</a>
+        </div>
+      </section>
+
+      <section class="teaser" id="videos">
+        <div class="teaser-video">
+          <div class="video-label">Project video placeholder</div>
+          <p>Overview video: FoCo-VLA method, robot setup, and contact-rich task montage.</p>
+        </div>
+      </section>
+
+      <section class="section" id="overview">
+        <h2>Overview</h2>
+        <figure class="figure-frame">
+          <img
+            src="docs/longvla/assets/foco_method.png"
+            alt="FoCo-VLA architecture overview."
+            loading="lazy"
+          />
+        </figure>
+        <p>
+          FoCo-VLA studies how force and torque history should be represented in
+          vision-language-action policies for contact-rich manipulation. Instead
+          of appending force as a flat state vector, FoCo-VLA turns force history
+          into structured context tokens that join the vision-language prefix
+          before continuous action generation.
+        </p>
+      </section>
+
+      <section class="section" id="method">
+        <h2>Method</h2>
+        <div class="method-cards">
+          <article>
+            <h3>Force-as-Context</h3>
+            <p>
+              Joint position, velocity, and filtered effort history are encoded
+              as force context tokens in the VLA prefix.
+            </p>
+          </article>
+          <article>
+            <h3>Task-Conditioned ForcePrior</h3>
+            <p>
+              A lightweight prior predicts expected task force, separating
+              nominal contact from residual contact deviation.
+            </p>
+          </article>
+          <article>
+            <h3>Per-Joint Tokenization</h3>
+            <p>
+              Each joint receives an explicit token with arm and joint identity,
+              preserving local contact structure in the dual-arm system.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Robot Tasks</h2>
+        <div class="video-grid">
+          <article class="video-card">
+            <div class="thumb">Video</div>
+            <h3>Human-object handover</h3>
+            <p>Release timing under human pull and contact-state switch.</p>
+          </article>
+          <article class="video-card">
+            <div class="thumb">Video</div>
+            <h3>Insertion</h3>
+            <p>Pose offset, alignment, contact constraints, and jamming.</p>
+          </article>
+          <article class="video-card">
+            <div class="thumb">Video</div>
+            <h3>Whiteboard erasing</h3>
+            <p>Continuous surface contact and Z-axis depth generalization.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="results">
+        <h2>Experiments</h2>
+        <p>
+          Experiments are designed around real contact metrics, not only final
+          task success. The RA-L version will report task completion, release
+          timing, jamming/contact loss, and robustness under depth or pose
+          perturbations.
+        </p>
+        <div class="result-grid">
+          <figure class="figure-frame">
+            <img
+              src="docs/longvla/assets/foco_task_completion.png"
+              alt="FoCo-VLA task completion and module degradation ablation."
+              loading="lazy"
+            />
+            <figcaption>Task completion and module degradation ablations.</figcaption>
+          </figure>
+          <figure class="figure-frame">
+            <img
+              src="docs/longvla/assets/foco_joint_torque_release.png"
+              alt="Joint torque aligned with gripper opening in handover."
+              loading="lazy"
+            />
+            <figcaption>Contact-conditioned release analysis for handover.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>System Setup</h2>
+        <div class="facts">
+          <div><strong>Robot</strong><span>Dual AgileX Piper arms, 14 real action dimensions</span></div>
+          <div><strong>Inputs</strong><span>Multi-view RGB, language, joint state, filtered effort/torque</span></div>
+          <div><strong>Tasks</strong><span>Handover, insertion, whiteboard erasing</span></div>
+          <div><strong>Baselines</strong><span>Vision-only pi0.5, TA-VLA, single force token, w/o ForcePrior, w/o joint ID</span></div>
+        </div>
+      </section>
+
+      <section class="section" id="release">
+        <h2>Release Plan</h2>
+        <div class="release-row">
+          <a href="#" aria-disabled="true">Paper coming soon</a>
+          <a href="#" aria-disabled="true">Code coming soon</a>
+          <a href="#" aria-disabled="true">Supplementary videos pending</a>
+          <a href="#" aria-disabled="true">Dataset tools in preparation</a>
+        </div>
+      </section>
+
+      <section class="section" id="paper">
+        <h2>Citation</h2>
+        <pre><code>@article{focovla2026,
+  title   = {FoCo-VLA: Force-as-Context Vision-Language-Action Policies for Contact-Rich Manipulation},
+  author  = {Author List},
+  journal = {IEEE Robotics and Automation Letters},
+  year    = {2026},
+  note    = {Under preparation}
+}</code></pre>
+      </section>
+    </main>
+
+    <footer>
+      This project page is a draft for the FoCo-VLA RA-L submission.
+    </footer>
+  </body>
+</html>
