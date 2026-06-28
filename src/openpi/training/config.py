@@ -14,12 +14,14 @@ from typing_extensions import override
 import tyro
 
 import openpi.models.model as _model
+import openpi.models.longvla as longvla
 import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.longvla_policy as longvla_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -87,6 +89,13 @@ class DataConfig:
     # LeRobot dataset is using different keys to represent the action.
     action_sequence_keys: Sequence[str] = ("actions",)
 
+    # Per-key list of *frame* offsets (integers, relative to the current frame; e.g. -1 = previous frame,
+    # 0 = current). At dataset construction time these are converted to seconds via /fps and merged into
+    # lerobot's `delta_timestamps`, returning a stacked time-window per sample. Used to retrieve historical
+    # observation windows (e.g. LongVLA's force history) without maintaining stateful buffers in transforms.
+    # None (default) preserves the existing behavior: only `action_sequence_keys` get a time window.
+    observation_delta_frames: dict[str, Sequence[int]] | None = None
+
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
 
@@ -124,14 +133,13 @@ class ModelTransformFactory(GroupFactory):
                     ],
                 )
             case _model.ModelType.PI05:
-                assert isinstance(model_config, pi0_config.Pi0Config)
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
                         _transforms.ResizeImages(224, 224),
                         _transforms.TokenizePrompt(
                             _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
-                            discrete_state_input=model_config.discrete_state_input,
+                            discrete_state_input=getattr(model_config, "discrete_state_input", True),
                         ),
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
@@ -356,6 +364,86 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotLongVLADataConfig(DataConfigFactory):
+    """Data config for LongVLA's Force-as-Context model.
+
+    与 LongVLA 的数据 schema 配套（参考 src/openpi/policies/longvla_policy.py 顶部
+    的 schema 注释）:
+      - 单帧字段: observation.{image,left_image,right_image,left_state,right_state}
+      - 滑窗字段: observation.{qpos,qvel,filtered_effort}  按 lerobot delta_timestamps
+                  取过去 W=force_window 帧
+      - action  : 取未来 action_horizon 帧
+    """
+
+    action_sequence_keys: Sequence[str] = ("action",)
+    action_dims: int = 14
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        if not isinstance(model_config, longvla.LongVLAConfig):
+            raise TypeError("LeRobotLongVLADataConfig expects a LongVLAConfig model.")
+
+        # 把 lerobot 标准字段 (observation.xxx, action) 重命名到 LongVLAInputs 期望的
+        # 输入命名 (observation/xxx, actions)。lerobot 用点号、openpi transform 用斜杠。
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        # 当前帧 robot_state (每只手 7 维: 6 关节 qpos + gripper 位置)
+                        "observation/left_state": "observation.left_state",
+                        "observation/right_state": "observation.right_state",
+                        # 滑窗力相关：通过 observation_delta_frames 取 W 帧历史
+                        "observation/qpos": "observation.qpos",
+                        "observation/qvel": "observation.qvel",
+                        "observation/filtered_effort": "observation.filtered_effort",
+                        # 三个场景相机（不带 wrist 子串，保留 RandomCrop+Rotate 增广）
+                        "observation/image": "observation.image",
+                        "observation/left_image": "observation.left_image",
+                        "observation/right_image": "observation.right_image",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[
+                longvla_policy.LongVLAInputs(
+                    model_type=model_config.model_type,
+                    per_arm_state_dim=model_config.per_arm_state_dim,
+                    num_joints=model_config.num_joints,
+                    force_window=model_config.force_window,
+                    force_channels=model_config.force_channels,
+                )
+            ],
+            outputs=[longvla_policy.LongVLAOutputs(action_dims=self.action_dims)],
+        )
+
+        # Force history 通过 lerobot delta_timestamps 一次性取 W 帧:
+        # frame_offsets = [-(W-1), -(W-2), ..., -1, 0]，按 fps 换算秒数。
+        # 例: W=16, fps=30 → 取过去约 0.5s 的窗口。
+        history_offsets = list(range(-(model_config.force_window - 1), 1))
+        observation_delta_frames = {
+            "observation.qpos": history_offsets,
+            "observation.qvel": history_offsets,
+            "observation.filtered_effort": history_offsets,
+        }
+
+        # 后处理仍然复用 openpi 标准的 pi0.5 tokenization / normalization 逻辑。
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+            observation_delta_frames=observation_delta_frames,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
     """
     Config for training on DROID, using RLDS data format (for efficient training on larger datasets).
@@ -557,6 +645,64 @@ class TrainConfig:
 
 
 # Use `get_config` if you need to get a config by name in your code.
+
+# LongVLA handover baseline TrainConfig, 抽出来作为模块级常量是为了让 ablation 用
+# dataclasses.replace 派生 (避免复制粘贴漂移). 这是在 _CONFIGS list 之外定义,
+# 然后被 list 引用——因为 list comprehension 里没法访问还在构造中的 _CONFIGS.
+_LONGVLA_HANDOVER = TrainConfig(
+    name="longvla_handover",
+    model=longvla.LongVLAConfig(
+        paligemma_variant="gemma_2b_lora",
+        action_expert_variant="gemma_300m_lora",
+        action_horizon=25,
+        num_arms=2,
+        per_arm_state_dim=7,
+        per_arm_force_dim=7,
+        force_window=16,
+        force_channels=3,
+        # 默认禁用视觉条件以抗 prior collapse（详见 longvla.py 中 ForcePrior 注释）。
+        # 切到 True 即可获得 paper ablation 中的"含视觉 prior"对照组。
+        prior_uses_vision=False,
+        # joint/arm ID 嵌入: 给每个 force token 加显式 (arm, joint-within-arm) ID,
+        # 帮助小数据下 force branch 区分关节. False = ablation 对照组.
+        use_joint_id_embedding=True,
+    ),
+    data=LeRobotLongVLADataConfig(
+        repo_id="longvla_handover_0527",
+        base_config=DataConfig(prompt_from_task=True),
+    ),
+    weight_loader=weight_loaders.LongVLAWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+    freeze_filter=longvla.LongVLAConfig(
+        paligemma_variant="gemma_2b_lora",
+        action_expert_variant="gemma_300m_lora",
+    ).get_freeze_filter(),
+    ema_decay=None,
+    batch_size=32,
+    num_workers=8,
+    num_train_steps=35_000,
+    save_interval=2000,
+    keep_period=2000,
+    lr_schedule=_optimizer.CosineDecaySchedule(
+        warmup_steps=2_000,
+        peak_lr=2.5e-5,
+        decay_steps=50_000,
+    ),
+)
+
+
+def _longvla_ablation(name: str, **model_overrides) -> "TrainConfig":
+    """Derive a LongVLA ablation TrainConfig from _LONGVLA_HANDOVER.
+
+    所有 ablation 共享 baseline 的所有训练超参 (lr, batch_size, weight_loader, ...),
+    只覆盖 LongVLAConfig 里的 ablation flag. 这样 baseline 改超参时 ablation 自动跟上.
+    """
+    return dataclasses.replace(
+        _LONGVLA_HANDOVER,
+        name=name,
+        model=dataclasses.replace(_LONGVLA_HANDOVER.model, **model_overrides),
+    )
+
+
 _CONFIGS = [
     #
     # Inference Aloha configs.
@@ -825,6 +971,73 @@ _CONFIGS = [
         num_train_steps=20_000,
         batch_size=64,
     ),
+    #
+    # LongVLA: Force-as-Context VLA (handover / co-manipulation 系列).
+    # 从 pi0.5 base 权重初始化主干；force_prior / joint_force_tokenizer 走随机初始化。
+    # LoRA-finetune 模式：仅训练 LoRA 增量 + 新增的力分支模块，骨干冻结。
+    #
+    #
+    # Smoke-test variant: 用随机初始化跳过 pi0.5 base 的 10GB 下载, 仅验证训练 pipeline
+    # 是否端到端通过 (forward + backward + optimizer step + checkpoint save). 不做收敛.
+    # 本机验证用; 正式训练在服务器上跑 longvla_handover.
+    #
+    TrainConfig(
+        name="longvla_smoke",
+        model=longvla.LongVLAConfig(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            action_horizon=25,
+            num_arms=2,
+            per_arm_state_dim=7,
+            per_arm_force_dim=7,
+            force_window=16,
+            force_channels=3,
+            prior_uses_vision=False,
+        ),
+        data=LeRobotLongVLADataConfig(
+            repo_id="longvla_handover_demo",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.NoOpWeightLoader(),  # 不下 pi0.5 base
+        freeze_filter=longvla.LongVLAConfig(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        batch_size=1,
+        num_train_steps=10,
+        save_interval=100,
+        keep_period=None,
+        wandb_enabled=False,
+    ),
+    #
+    # LongVLA handover baseline. 完整定义在 _LONGVLA_HANDOVER (上面), 这里只是把它
+    # 加进 _CONFIGS. 抽出去是为了让 ablation 用 dataclasses.replace 派生.
+    #
+    _LONGVLA_HANDOVER,
+    #
+    # LongVLA ablation 变体: 每个只改一个 flag, 其他超参完全继承自 _LONGVLA_HANDOVER.
+    # 全部需要从头重训 (ablation 改的是 loss 表面或模型参数集, 推理切不掉).
+    #
+    # 跑法: 把 baseline 命令里的 config name 换掉即可, 比如
+    #   uv run python scripts/train.py longvla_handover_no_prior --exp-name run_0528_no_prior ...
+    #
+    # A1: aux loss 权重扫. 0 = ForcePrior 没梯度信号 (fc_out 永远输出 0, 等价于 disable
+    # 但模块仍跑 forward). 0.1 = 10× 默认, 测过度加权.
+    _longvla_ablation("longvla_handover_aux0", aux_anomaly_weight=0.0),
+    _longvla_ablation("longvla_handover_aux_hi", aux_anomaly_weight=0.1),
+    # A2: 整条 ForcePrior 分支砍掉. tau_hat ≡ 0, tokenizer extras = (0, |tau_t|),
+    # aux_loss 强制为 0. 比 aux=0 更彻底——结构上没有 prior 模块.
+    _longvla_ablation("longvla_handover_no_prior", disable_force_prior=True),
+    # A3: 关掉 (arm_id, joint_id) embedding, force token 只能靠 prefix PE 隐式区分关节.
+    _longvla_ablation("longvla_handover_no_joint_id", use_joint_id_embedding=False),
+    # A4: prior 也喂视觉池化. 可能 prior collapse, paper 主结论是 False 更稳.
+    _longvla_ablation("longvla_handover_prior_vision", prior_uses_vision=True),
+    # A5: per-joint token → 单 token. 隔离"逐关节 tokenization"这条新颖性轴:
+    #   仍在 encoder 侧、仍带 task-conditioned prior, 唯一变量是把 K 个关节聚合成 1 个 token
+    #   (对标 TA-VLA EXPERT_HIS_C 的单 token, 搬到 encoder 侧 + 加 prior). joint/arm ID
+    #   embedding 在 single 模式自动忽略.
+    _longvla_ablation("longvla_handover_single_token", force_token_mode="single"),
     #
     # Fine-tuning DROID configs.
     #

@@ -73,6 +73,30 @@ class PaliGemmaWeightLoader(WeightLoader):
         return _merge_params(loaded_params, params, missing_regex=".*")
 
 
+@dataclasses.dataclass(frozen=True)
+class LongVLAWeightLoader(WeightLoader):
+    """Loads pi0.5 base weights while keeping LongVLA-specific layers from init.
+
+    LongVLA 在 pi0.5 backbone 之上新增两个力分支模块:
+      - force_prior          : 任务条件化的期望力 MLP
+      - joint_force_tokenizer: 逐关节力 token 化器
+
+    这两个模块没有对应的预训练权重，必须从随机初始化保留（不能被预训练加载所
+    覆盖也不能在加载时被默默丢弃）。下面的 regex 把这两个模块（以及任意 LoRA
+    增量）标记为 "missing from pretrained, keep init"。
+    """
+
+    params_path: str
+
+    def load(self, params: at.Params) -> at.Params:
+        loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
+        return _merge_params(
+            loaded_params,
+            params,
+            missing_regex=".*lora.*|.*force_prior.*|.*joint_force_tokenizer.*",
+        )
+
+
 def _merge_params(loaded_params: at.Params, params: at.Params, *, missing_regex: str) -> at.Params:
     """Merges the loaded parameters with the reference parameters.
 

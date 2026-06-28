@@ -3,6 +3,23 @@ assets/
 checkpoints/
 data/
 wandb/
+logs/
+*.hdf5
+*.h5
+*.ckpt
+*.safetensors
+*.pt
+*.pth
+*.mp4
+*.avi
+*.mov
+*.mkv
+pyproject.toml.bak
+.codex_write_test
+.venv-py310/
+examples/piper_bimanual/datasets/
+!docs/longvla/assets/
+!docs/longvla/assets/**
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

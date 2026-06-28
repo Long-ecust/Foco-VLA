@@ -138,11 +138,20 @@ def create_torch_dataset(
         return FakeDataset(model_config, num_samples=1024)
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+
+    # 默认: action_sequence_keys 取 [t, t+1, ..., t+action_horizon-1] 帧（未来动作）
+    delta_timestamps = {
+        key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+    }
+    # 可选: observation_delta_frames 取负偏移帧（过去观测历史），按 fps 换算秒数后合并。
+    # 用于 LongVLA 等需要时间窗口观测（如力矩历史）的模型；为 None 时维持旧行为。
+    if data_config.observation_delta_frames:
+        for key, offsets in data_config.observation_delta_frames.items():
+            delta_timestamps[key] = [offset / dataset_meta.fps for offset in offsets]
+
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
-        delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-        },
+        delta_timestamps=delta_timestamps,
     )
 
     if data_config.prompt_from_task:

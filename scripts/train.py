@@ -1,4 +1,5 @@
 import dataclasses
+import csv
 import functools
 import logging
 import platform
@@ -120,17 +121,23 @@ def init_train_state(
         return train_state_shape, state_sharding
 
     partial_params = _load_weights_and_validate(config.weight_loader, train_state_shape.params.to_pure_dict())
-    replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
-    # Initialize the train state and mix in the partial params.
-    train_state = jax.jit(
-        init,
-        donate_argnums=(1,),  # donate the partial params buffer.
-        in_shardings=replicated_sharding,
-        out_shardings=state_sharding,
-    )(init_rng, partial_params)
+    # Plan B: 绕开 jax.jit(out_shardings=...) 在 init 上的 pytree NodeDef 比较.
+    # flax 0.10.2 对 LongVLA 的 graphdef 在 eval_shape 路径 vs jit 路径上算出的
+    # attributes 列表不一致 (NodeDef mismatch), 触发 pjit out_shardings 报错.
+    # 改成 eager 跑 init + device_put 手动 shard. 一次性, 不影响后续 train_step.
+    train_state = init(init_rng, partial_params)
 
-    return train_state, state_sharding
+    # state_sharding 来自 eval_shape 的 graphdef, train_state 来自 eager 的 graphdef.
+    # flax 0.10.2 下两份 treedef 不一致, 但**叶子数量/顺序一致** (都是 VariableState).
+    # 用 train_state 的 treedef 重新包装 sharding spec, 让 device_put 能匹配上.
+    sharding_leaves = jax.tree.leaves(state_sharding)
+    state_sharding_aligned = jax.tree.unflatten(jax.tree.structure(train_state), sharding_leaves)
+    train_state = jax.device_put(train_state, state_sharding_aligned)
+
+    # 必须返回 aligned 版本: 后续 ptrain_step 的 in_shardings/out_shardings 都要用它,
+    # 否则 train_step 的 jit 又会因 NodeDef 不一致报同样的错.
+    return train_state, state_sharding_aligned
 
 
 @at.typecheck
@@ -247,6 +254,33 @@ def main(config: _config.TrainConfig):
         donate_argnums=(1,),
     )
 
+    # ---- metric 旁路: 不进 train_step, 不影响主 graphdef. 每 log_interval 单独跑一次
+    # forward-only pass 拿分项 loss + force 量级, 落到 CSV. wandb 那条曲线 (主 info)
+    # 完全不变.
+    def _metrics_fn(rng, state, batch):
+        model = nnx.merge(state.model_def, state.params)
+        model.train()
+        observation, actions = batch
+        metrics_rng = jax.random.fold_in(rng, state.step)
+        if hasattr(model, "compute_loss_with_metrics"):
+            _, aux = model.compute_loss_with_metrics(metrics_rng, observation, actions, train=True)
+            return aux
+        return {}
+
+    pmetrics_step = jax.jit(
+        _metrics_fn,
+        in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
+        out_shardings=replicated_sharding,
+    )
+
+    metrics_csv_path = config.checkpoint_dir / "metrics.csv"
+    metrics_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    # header 在第一次拿到 metrics 时再写, 因为 key 取决于具体 model. resume 时 append, 否则覆盖.
+    csv_mode = "a" if resuming and metrics_csv_path.exists() else "w"
+    csv_file = open(metrics_csv_path, csv_mode, newline="")
+    csv_writer: csv.DictWriter | None = None
+    logging.info(f"Metrics CSV: {metrics_csv_path} (mode={csv_mode})")
+
     start_step = int(train_state.step)
     pbar = tqdm.tqdm(
         range(start_step, config.num_train_steps),
@@ -267,11 +301,28 @@ def main(config: _config.TrainConfig):
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []
+
+            # 旁路: 算分项 metrics 并写 CSV / stdout. 用当前 batch 跑 forward-only pass.
+            with sharding.set_mesh(mesh):
+                aux_jax = pmetrics_step(train_rng, train_state, batch)
+            aux = jax.device_get(aux_jax)
+            if aux:
+                aux_floats = {k: float(v) for k, v in aux.items()}
+                aux_str = ", ".join(f"{k}={v:.4f}" for k, v in aux_floats.items())
+                pbar.write(f"  [metrics] {aux_str}")
+                if csv_writer is None:
+                    fieldnames = ["step", *aux_floats.keys()]
+                    csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                    if csv_mode == "w":
+                        csv_writer.writeheader()
+                csv_writer.writerow({"step": step, **aux_floats})
+                csv_file.flush()
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
 
+    csv_file.close()
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()
 

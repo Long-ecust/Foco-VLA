@@ -123,6 +123,7 @@ class CallbackHandler(ocp.AsyncCheckpointHandler):
 
     def save(self, directory: epath.Path, args: CallbackSave):
         if jax.process_index() == 0:
+            directory.mkdir(parents=True, exist_ok=True)
             args.callback(directory)
 
     async def async_save(self, directory: epath.Path, args: CallbackSave) -> list[futures.Future]:
